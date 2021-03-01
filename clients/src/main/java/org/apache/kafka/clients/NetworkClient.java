@@ -255,8 +255,16 @@ public class NetworkClient implements KafkaClient {
      */
     @Override
     public List<ClientResponse> poll(long timeout, long now) {
+        /**
+         * 步骤一：
+         *  封装了一个要拉取元数据请求
+         */
         long metadataTimeout = metadataUpdater.maybeUpdate(now);
         try {
+            /**
+             * 步骤二：
+             *  发送网络请求
+             */
             this.selector.poll(Utils.min(timeout, metadataTimeout, requestTimeoutMs));
         } catch (IOException e) {
             log.error("Unexpected error during I/O", e);
@@ -266,6 +274,10 @@ public class NetworkClient implements KafkaClient {
         long updatedNow = this.time.milliseconds();
         List<ClientResponse> responses = new ArrayList<>();
         handleCompletedSends(responses, updatedNow);
+        /**
+         * 步骤三：
+         *  处理响应，响应里有我们需要的元数据
+         */
         handleCompletedReceives(responses, updatedNow);
         handleDisconnections(responses, updatedNow);
         handleConnections();

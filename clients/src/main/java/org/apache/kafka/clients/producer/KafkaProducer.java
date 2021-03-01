@@ -442,10 +442,18 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
     private Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback callback) {
         TopicPartition tp = null;
         try {
+            /**
+             * 1、等待拉取元数据
+             *
+             */
             // first make sure the metadata for the topic is available
             ClusterAndWaitTime clusterAndWaitTime = waitOnMetadata(record.topic(), record.partition(), maxBlockTimeMs);
             long remainingWaitMs = Math.max(0, maxBlockTimeMs - clusterAndWaitTime.waitedOnMetadataMs);
             Cluster cluster = clusterAndWaitTime.cluster;
+
+            /**
+             * 2.对消息的key 和 value进行序列化
+             */
             byte[] serializedKey;
             try {
                 serializedKey = keySerializer.serialize(record.topic(), record.key());
@@ -463,17 +471,45 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                         " specified in value.serializer");
             }
 
+            /**
+             * 3.根据分区器选择消息应该发送的分区
+             * 因为前面已经获取了元数据
+             * 在这就可以根据元数据的信息计算一下，
+             * 应该把这个数据发送到哪个分区上
+             */
             int partition = partition(record, serializedKey, serializedValue, cluster);
             int serializedSize = Records.LOG_OVERHEAD + Record.recordSize(serializedKey, serializedValue);
+
+            /**
+             * 4.确认一下消息的大小是否超过了最大值
+             * kafka启动的时候默认加载一个配置参数，设定消息最大大小（1M）
+             */
             ensureValidRecordSize(serializedSize);
+
+            /**
+             * 5.根据元数据信息，封装分区对象
+             */
             tp = new TopicPartition(record.topic(), partition);
             long timestamp = record.timestamp() == null ? time.milliseconds() : record.timestamp();
             log.trace("Sending record {} with callback {} to topic {} partition {}", record, callback, record.topic(), partition);
+
+            /**
+             * 6.给每条消息设定回调函数
+             */
             // producer callback will make sure to call both 'callback' and interceptor callback
             Callback interceptCallback = this.interceptors == null ? callback : new InterceptorCallback<>(callback, this.interceptors, tp);
+
+            /**
+             * 7.将消息放入Accumulator(32M的一个内存)
+             * 然后由Accumulator将消息封装为一个批次一个批次的去发送
+             */
             RecordAccumulator.RecordAppendResult result = accumulator.append(tp, timestamp, serializedKey, serializedValue, interceptCallback, remainingWaitMs);
             if (result.batchIsFull || result.newBatchCreated) {
                 log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), partition);
+
+                /**
+                 * 8.唤醒sender线程，真正发送数据
+                 */
                 this.sender.wakeup();
             }
             return result.future;

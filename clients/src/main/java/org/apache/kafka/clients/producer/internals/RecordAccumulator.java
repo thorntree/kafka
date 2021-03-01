@@ -165,35 +165,69 @@ public final class RecordAccumulator {
         // abortIncompleteBatches().
         appendsInProgress.incrementAndGet();
         try {
+
+            /**
+             * 根据当前消息的信息，获取一个队列
+             */
             // check if we have an in-progress batch
             Deque<RecordBatch> dq = getOrCreateDeque(tp);
             synchronized (dq) {
                 if (closed)
                     throw new IllegalStateException("Cannot send after the producer is closed.");
+
+                /**
+                 * 尝试往队列里面的批次里添加数据
+                 */
                 RecordAppendResult appendResult = tryAppend(timestamp, key, value, callback, dq);
                 if (appendResult != null)
                     return appendResult;
             }
-
+            /**
+             * 获取批次的大小
+             */
             // we don't have an in-progress record batch try to allocate a new batch
             int size = Math.max(this.batchSize, Records.LOG_OVERHEAD + Record.recordSize(key, value));
             log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
+
+            /**
+             * 根据批次的大小分配内存
+             */
             ByteBuffer buffer = free.allocate(size, maxTimeToBlock);
             synchronized (dq) {
                 // Need to check if producer is closed again after grabbing the dequeue lock.
                 if (closed)
                     throw new IllegalStateException("Cannot send after the producer is closed.");
 
+                /**
+                 * 尝试把数据写入到批次
+                 * 代码第一执行到这的时候还是失败的
+                 * 当前只是分配了内存，但是还没有创建批次
+                 */
                 RecordAppendResult appendResult = tryAppend(timestamp, key, value, callback, dq);
                 if (appendResult != null) {
                     // Somebody else found us a batch, return the one we waited for! Hopefully this doesn't happen often...
+
+                    /**
+                     * 释放内存
+                     */
                     free.deallocate(buffer);
                     return appendResult;
                 }
+
+                /**
+                 * 根据内存大小封装批次
+                 */
                 MemoryRecords records = MemoryRecords.emptyRecords(buffer, compression, this.batchSize);
                 RecordBatch batch = new RecordBatch(tp, records, time.milliseconds());
+
+                /**
+                 * 往批次里写数据
+                 */
                 FutureRecordMetadata future = Utils.notNull(batch.tryAppend(timestamp, key, value, callback, time.milliseconds()));
 
+                /**
+                 * 将批次加入到队列队尾
+                 */
                 dq.addLast(batch);
                 incomplete.add(batch);
                 return new RecordAppendResult(future, dq.size() > 1 || batch.records.isFull(), true);
@@ -208,8 +242,17 @@ public final class RecordAccumulator {
      * resources (like compression streams buffers).
      */
     private RecordAppendResult tryAppend(long timestamp, byte[] key, byte[] value, Callback callback, Deque<RecordBatch> deque) {
+
+        /**
+         * 获取最后一个批次
+         * 第一个线程进来时肯定没有批次，所以last肯定为null
+         * 当有线程再次进来时，这个last不为空
+         */
         RecordBatch last = deque.peekLast();
         if (last != null) {
+            /**
+             * 真正插入数据
+             */
             FutureRecordMetadata future = last.tryAppend(timestamp, key, value, callback, time.milliseconds());
             if (future == null)
                 last.records.close();
@@ -301,9 +344,14 @@ public final class RecordAccumulator {
         long nextReadyCheckDelayMs = Long.MAX_VALUE;
         Set<String> unknownLeaderTopics = new HashSet<>();
 
+        /**
+         * 如果 waiters里有数据，说明内存池里的内存不够用了
+         */
         boolean exhausted = this.free.queued() > 0;
         for (Map.Entry<TopicPartition, Deque<RecordBatch>> entry : this.batches.entrySet()) {
+            //获取到分区
             TopicPartition part = entry.getKey();
+            //获取到分区队列
             Deque<RecordBatch> deque = entry.getValue();
 
             Node leader = cluster.leaderFor(part);
@@ -313,16 +361,41 @@ public final class RecordAccumulator {
                     // Note that entries are currently not removed from batches when deque is empty.
                     unknownLeaderTopics.add(part.topic());
                 } else if (!readyNodes.contains(leader) && !muted.contains(part)) {
+                    /**
+                     * 从队列里拿出最老的批次
+                     * 判断是否符合发送出去的条件
+                     */
                     RecordBatch batch = deque.peekFirst();
                     if (batch != null) {
+                        /**
+                         * lastAttemptMs :重试次数
+                         * batch.lastAttemptMs：上一次重试的时间
+                         * retryBackoffMs：重试的时间间隔
+                         */
                         boolean backingOff = batch.attempts > 0 && batch.lastAttemptMs + retryBackoffMs > nowMs;
+                        /**
+                         * 批次等待时间
+                         */
                         long waitedTimeMs = nowMs - batch.lastAttemptMs;
+
+                        /**
+                         * 消息最多存多长时间就必须发送出去了
+                         */
                         long timeToWaitMs = backingOff ? retryBackoffMs : lingerMs;
                         long timeLeftMs = Math.max(timeToWaitMs - waitedTimeMs, 0);
+                        /**
+                         * 是否有写满的批次
+                         */
                         boolean full = deque.size() > 1 || batch.records.isFull();
+                        /**
+                         * 已经等待时间大于等于需要等待时间
+                         */
                         boolean expired = waitedTimeMs >= timeToWaitMs;
                         boolean sendable = full || expired || exhausted || closed || flushInProgress();
                         if (sendable && !backingOff) {
+                            /**
+                             * 把可以发送批次的partition的leader partition所在的主机加入数组
+                             */
                             readyNodes.add(leader);
                         } else {
                             // Note that this results in a conservative estimate since an un-sendable partition may have

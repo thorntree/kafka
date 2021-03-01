@@ -81,6 +81,7 @@ public class Selector implements Selectable {
     private static final Logger log = LoggerFactory.getLogger(Selector.class);
 
     private final java.nio.channels.Selector nioSelector;
+
     private final Map<String, KafkaChannel> channels;
     private final List<Send> completedSends;
     private final List<NetworkReceive> completedReceives;
@@ -171,6 +172,7 @@ public class Selector implements Selectable {
             socket.setSendBufferSize(sendBufferSize);
         if (receiveBufferSize != Selectable.USE_DEFAULT_BUFFER_SIZE)
             socket.setReceiveBufferSize(receiveBufferSize);
+
         socket.setTcpNoDelay(true);
         boolean connected;
         try {
@@ -182,8 +184,11 @@ public class Selector implements Selectable {
             socketChannel.close();
             throw e;
         }
+
         SelectionKey key = socketChannel.register(nioSelector, SelectionKey.OP_CONNECT);
+
         KafkaChannel channel = channelBuilder.buildChannel(id, key, maxReceiveSize);
+
         key.attach(channel);
         this.channels.put(id, channel);
 
@@ -201,9 +206,15 @@ public class Selector implements Selectable {
      * Note that we are not checking if the connection id is valid - since the connection already exists
      */
     public void register(String id, SocketChannel socketChannel) throws ClosedChannelException {
+        /**
+         * 往自己的Selector上面注册OP_READ事件
+         * Processor线程可以读取客户端发过来的id连接
+         */
         SelectionKey key = socketChannel.register(nioSelector, SelectionKey.OP_READ);
         KafkaChannel channel = channelBuilder.buildChannel(id, key, maxReceiveSize);
+        //关联起来key跟value :可以根据key找到value,也可以根据value找到key
         key.attach(channel);
+        //channels维护了多个网络连接
         this.channels.put(id, channel);
     }
 
@@ -575,7 +586,9 @@ public class Selector implements Selectable {
                 Map.Entry<KafkaChannel, Deque<NetworkReceive>> entry = iter.next();
                 KafkaChannel channel = entry.getKey();
                 if (!channel.isMute()) {
+                    //获取到每个连接对应的请求队列
                     Deque<NetworkReceive> deque = entry.getValue();
+                    //获取响应（对服务端来说就是请求）
                     NetworkReceive networkReceive = deque.poll();
                     this.completedReceives.add(networkReceive);
                     this.sensors.recordBytesReceived(channel.id(), networkReceive.payload().limit());

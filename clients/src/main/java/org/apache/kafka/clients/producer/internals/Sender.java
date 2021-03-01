@@ -171,10 +171,26 @@ public class Sender implements Runnable {
      *            The current POSIX time in milliseconds
      */
     void run(long now) {
+        /**
+         * 步骤一：
+         *   获取元数据
+         */
         Cluster cluster = metadata.fetch();
+
+        /**
+         * 步骤二：
+         *  首先判断有哪些partition有批次可以发送
+         *  批次可以发送出去的条件
+         *  获取当前partition的leader partition对应的broker主机（根据元数据信息就能获取）
+         *
+         */
         // get the list of partitions with data ready to send
         RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(cluster, now);
 
+        /**
+         * 步骤三：
+         *  标识还没有拉取到元数据的topic
+         */
         // if there are any partitions whose leaders are not known yet, force metadata update
         if (!result.unknownLeaderTopics.isEmpty()) {
             // The set of topics with unknown leader contains topics with leader election pending as well as
@@ -190,12 +206,23 @@ public class Sender implements Runnable {
         long notReadyTimeout = Long.MAX_VALUE;
         while (iter.hasNext()) {
             Node node = iter.next();
+            /**
+             * 步骤四：
+             *  检查与要发送数据主句的网络是否已建立好
+             */
             if (!this.client.ready(node, now)) {
+                //如果没有建立好连接，则从result中移除相应主机
                 iter.remove();
                 notReadyTimeout = Math.min(notReadyTimeout, this.client.connectionDelay(node, now));
             }
         }
 
+        /**
+         * 步骤五：
+         *    合并批次请求
+         *    发往同一台服务器的批次合并发送请求
+         *    减少网络传输次数
+         */
         // create produce requests
         Map<Integer, List<RecordBatch>> batches = this.accumulator.drain(cluster,
                                                                          result.readyNodes,
@@ -209,12 +236,21 @@ public class Sender implements Runnable {
             }
         }
 
+        /**
+         * 步骤六：
+         *  对超时批次的处理
+         */
         List<RecordBatch> expiredBatches = this.accumulator.abortExpiredBatches(this.requestTimeout, now);
         // update sensors
         for (RecordBatch expiredBatch : expiredBatches)
             this.sensors.recordErrors(expiredBatch.topicPartition.topic(), expiredBatch.recordCount);
 
         sensors.updateProduceRequestMetrics(batches);
+
+        /**
+         * 步骤七：
+         *  创建发送消息的请求
+         */
         List<ClientRequest> requests = createProduceRequests(batches, now);
         // If we have any nodes that are ready to send + have sendable data, poll with 0 timeout so this can immediately
         // loop and try sending more data. Otherwise, the timeout is determined by nodes that have partitions with data
@@ -233,6 +269,10 @@ public class Sender implements Runnable {
         // otherwise if some partition already has some data accumulated but not ready yet,
         // the select time will be the time difference between now and its linger expiry time;
         // otherwise the select time will be the time difference between now and the metadata expiry time;
+        /**
+         * 步骤八：
+         *  真正执行网络操作的都是这个NetWordClient组件
+         */
         this.client.poll(pollTimeout, now);
     }
 

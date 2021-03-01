@@ -46,6 +46,9 @@ public final class BufferPool {
     private final long totalMemory;
     private final int poolableSize;
     private final ReentrantLock lock;
+    /**
+     * 池子就是一个队列，队列里面放的就是一块一块的内存
+     */
     private final Deque<ByteBuffer> free;
     private final Deque<Condition> waiters;
     private long availableMemory;
@@ -90,6 +93,9 @@ public final class BufferPool {
      *         forever)
      */
     public ByteBuffer allocate(int size, long maxTimeToBlockMs) throws InterruptedException {
+        /**
+         * 判断想要申请的内存大小是否超过32M
+         */
         if (size > this.totalMemory)
             throw new IllegalArgumentException("Attempt to allocate " + size
                                                + " bytes, but there is a hard limit of "
@@ -104,20 +110,36 @@ public final class BufferPool {
 
             // now check if the request is immediately satisfiable with the
             // memory on hand or if we need to block
+
+            /**
+             * 内存池内存大小
+             */
             int freeListSize = this.free.size() * this.poolableSize;
+
+            /**
+             * this.availableMemory + freeListSize 目前可用的总内存 大于要申请的内存
+             */
             if (this.availableMemory + freeListSize >= size) {
                 // we have enough unallocated or pooled memory to immediately
                 // satisfy the request
                 freeUp(size);
                 this.availableMemory -= size;
                 lock.unlock();
+                //直接分配内存
                 return ByteBuffer.allocate(size);
             } else {
+                /**
+                 * 内存不足时的处理
+                 */
                 // we are out of memory and will have to block
                 int accumulated = 0;
                 ByteBuffer buffer = null;
                 Condition moreMemory = this.lock.newCondition();
                 long remainingTimeToBlockNs = TimeUnit.MILLISECONDS.toNanos(maxTimeToBlockMs);
+
+                /**
+                 * 等待对象分配内存
+                 */
                 this.waiters.addLast(moreMemory);
                 // loop over and over until we have a buffer or have reserved
                 // enough memory to allocate one
@@ -204,14 +226,26 @@ public final class BufferPool {
     public void deallocate(ByteBuffer buffer, int size) {
         lock.lock();
         try {
+            /**
+             * 如果要还回来的内存大小 等于一个批次的大小
+             */
             if (size == this.poolableSize && size == buffer.capacity()) {
+                //清空内存里的东西
                 buffer.clear();
+                //把内存放入到内存池中
                 this.free.add(buffer);
             } else {
+                /**
+                 * 如果我们释放的内存大小不是一个批次内存的大小
+                 * 那就把他归为可用内存，等着垃圾回收
+                 */
                 this.availableMemory += size;
             }
             Condition moreMem = this.waiters.peekFirst();
             if (moreMem != null)
+            /**
+             * 唤醒正在等待分配内存的线程
+             */
                 moreMem.signal();
         } finally {
             lock.unlock();
